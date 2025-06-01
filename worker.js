@@ -152,7 +152,27 @@ async function createNote(domain, activity) {
   
   if (!object || !object.content) return null;
 
+  // 获取原始发送者的信息
+  let actorInfo;
+  try {
+    const actorResponse = await fetch(actor, {
+      headers: { 'Accept': ACCEPT_HEADER }
+    });
+    if (actorResponse.ok) {
+      actorInfo = await actorResponse.json();
+    }
+  } catch (error) {
+    console.error('Error fetching actor info:', error);
+  }
+
   const noteId = `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+  
+  // 使用 preferredUsername 而不是 name
+  const username = actorInfo ? actorInfo.preferredUsername : new URL(actor).pathname.split('/').pop();
+  const actorDomain = new URL(actor).host;
+  
+  // 构建消息内容，使用用户名而不是显示名称
+  const messageContent = `RT @${username}@${actorDomain}\n\n${object.content}`;
   
   return {
     '@context': [
@@ -163,14 +183,29 @@ async function createNote(domain, activity) {
     'type': 'Note',
     'published': new Date().toISOString(),
     'attributedTo': generateActorId(domain),
-    'content': `${object.content}`,
+    'content': messageContent,
     'to': ['https://www.w3.org/ns/activitystreams#Public'],
     'cc': [],
     'sensitive': object.sensitive || false,
     'contentMap': object.contentMap || null,
     'attachment': object.attachment || [],
-    'tag': object.tag || [],
-    'inReplyTo': object.inReplyTo || null
+    'tag': [
+      {
+        'type': 'Mention',
+        'href': actor,
+        'name': `@${username}@${actorDomain}`
+      },
+      ...(object.tag || [])
+    ],
+    'inReplyTo': object.inReplyTo || null,
+    // 添加原始作者信息，同样使用用户名
+    'originalAuthor': {
+      'type': 'Person',
+      'id': actor,
+      'name': username,
+      'preferredUsername': username,
+      'url': actor
+    }
   };
 }
 
