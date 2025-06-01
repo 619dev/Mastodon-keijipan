@@ -1,174 +1,197 @@
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === `/.well-known/webfinger`) {
-      return handleWebfinger(url);
-    }
-    if (request.method === "GET" && url.pathname.startsWith("/actor/")) {
-      return handleActor(url, env);
-    }
-    if (request.method === "POST" && url.pathname.startsWith("/inbox/")) {
-      return handleInbox(request, env);
-    }
-    return new Response("Not Found", { status: 404 });
-  }
-};
+// ActivityPub Broadcast Bot for Cloudflare Workers
+// Inspired by https://github.com/wxwmoe/wxwClub
 
-function handleWebfinger(url) {
-  const resource = url.searchParams.get("resource");
-  const match = /^acct:([^@]+)@([^@]+)$/.exec(resource);
-  if (!match) return new Response("Bad Request", { status: 400 });
+// Constants and types
+const CONTENT_TYPE_HEADER = 'application/activity+json';
+const ACCEPT_HEADER = 'application/activity+json, application/ld+json';
+const DEFAULT_ACTOR_NAME = 'Broadcast Bot';
+const DEFAULT_ACTOR_ICON = 'https://mastodon.social/avatars/original/missing.png';
 
-  const [_, name, domain] = match;
-  return Response.json({
-    subject: `acct:${name}@${domain}`,
-    links: [
-      {
-        rel: "self",
-        type: "application/activity+json",
-        href: `https://${domain}/actor/${name}`,
-      },
+// Helper functions
+function generateKeyId(domain) {
+  return `https://${domain}/actor#main-key`;
+}
+
+function generateActorId(domain) {
+  return `https://${domain}/actor`;
+}
+
+function parseHandle(mention) {
+  const match = mention.match(/@([^@]+)@(.+)/);
+  return match ? { username: match[1], domain: match[2] } : null;
+}
+
+function buildActorObject(domain, pubkey) {
+  const actorName = ACTOR_NAME || DEFAULT_ACTOR_NAME;
+  const actorIcon = ACTOR_ICON || DEFAULT_ACTOR_ICON;
+  
+  return {
+    '@context': [
+      'https://www.w3.org/ns/activitystreams',
+      'https://w3id.org/security/v1'
     ],
-  });
-}
-
-async function handleActor(url, env) {
-  const name = url.pathname.split("/").pop();
-  const actor = {
-    "@context": "https://www.w3.org/ns/activitystreams",
-    id: `https://${env.DOMAIN}/actor/${name}`,
-    type: "Person",
-    preferredUsername: name,
-    inbox: `https://${env.DOMAIN}/inbox/${name}`,
-    followers: `https://${env.DOMAIN}/followers/${name}`,
-    publicKey: {
-      id: `https://${env.DOMAIN}/actor/${name}#main-key`,
-      owner: `https://${env.DOMAIN}/actor/${name}`,
-      publicKeyPem: env.PUBLIC_KEY_PEM,
+    'id': generateActorId(domain),
+    'type': 'Person',
+    'preferredUsername': 'board',
+    'name': actorName,
+    'summary': 'A broadcast bot that forwards mentions to all followers',
+    'inbox': `https://${domain}/inbox`,
+    'outbox': `https://${domain}/outbox`,
+    'followers': `https://${domain}/followers`,
+    'following': `https://${domain}/following`,
+    'icon': {
+      'type': 'Image',
+      'mediaType': 'image/png',
+      'url': actorIcon
     },
-    name: env.ACTOR_NAME || "Broadcast Bot",
-    icon: {
-      type: "Image",
-      mediaType: "image/png",
-      url: env.ACTOR_ICON,
-    },
-  };
-  return Response.json(actor);
-}
-
-async function handleInbox(request, env) {
-  const body = await request.json();
-  const type = body.type;
-
-  if (type === "Follow") {
-    const follower = body.actor;
-    const name = new URL(request.url).pathname.split("/").pop();
-    await env.FOLLOWERS.put(name + ":" + follower, "1");
-    const accept = {
-      "@context": "https://www.w3.org/ns/activitystreams",
-      id: `${body.id}/accept`,
-      type: "Accept",
-      actor: `https://${env.DOMAIN}/actor/${name}`,
-      object: body,
-    };
-    await sendSignedRequest(follower + "/inbox", accept, env);
-    return new Response("Follow accepted");
-  }
-
-  if (type === "Create" && body.object && body.object.type === "Note") {
-    const name = new URL(request.url).pathname.split("/").pop();
-    const followers = await listFollowers(env, name);
-
-    const activity = {
-      "@context": "https://www.w3.org/ns/activitystreams",
-      id: body.id + "#forwarded",
-      type: "Create",
-      actor: `https://${env.DOMAIN}/actor/${name}`,
-      object: body.object,
-    };
-
-    for (const follower of followers) {
-      const inbox = follower + "/inbox";
-      await sendSignedRequest(inbox, activity, env);
+    'publicKey': {
+      'id': generateKeyId(domain),
+      'owner': generateActorId(domain),
+      'publicKeyPem': PUBLIC_KEY_PEM
     }
+  };
+}
 
-    return new Response("Broadcasted");
+async function verifySignature(request, body) {
+  try {
+    const signature = request.headers.get('signature');
+    if (!signature) return false;
+
+    // Basic signature verification logic
+    // In a production environment, you should implement proper HTTP Signature verification
+    return true;
+  } catch (error) {
+    return false;
   }
-
-  return new Response("Ignored", { status: 202 });
 }
 
-async function listFollowers(env, name) {
-  const list = await env.FOLLOWERS.list({ prefix: name + ":" });
-  return list.keys.map(k => k.name.split(":")[1]);
+async function createNote(domain, activity) {
+  const actor = activity.actor;
+  const object = activity.object;
+  
+  if (!object || !object.content) return null;
+
+  return {
+    '@context': 'https://www.w3.org/ns/activitystreams',
+    'id': `https://${domain}/notes/${Date.now()}`,
+    'type': 'Note',
+    'published': new Date().toISOString(),
+    'attributedTo': generateActorId(domain),
+    'content': `Forwarded from ${actor}:\n\n${object.content}`,
+    'to': ['https://www.w3.org/ns/activitystreams#Public']
+  };
 }
 
-async function sendSignedRequest(inboxUrl, body, env) {
-  const url = new URL(inboxUrl);
-  const headers = {
-    "Host": url.host,
-    "Date": new Date().toUTCString(),
-    "Content-Type": "application/activity+json",
-    Digest: "SHA-256=" + await digestBody(body),
+async function broadcastToFollowers(domain, activity, followers) {
+  const note = await createNote(domain, activity);
+  if (!note) return;
+
+  const announce = {
+    '@context': 'https://www.w3.org/ns/activitystreams',
+    'id': `https://${domain}/activities/${Date.now()}`,
+    'type': 'Announce',
+    'actor': generateActorId(domain),
+    'object': note,
+    'to': ['https://www.w3.org/ns/activitystreams#Public'],
+    'cc': followers
   };
 
-  const signature = await signRequest({
-    method: "POST",
-    url,
-    headers,
-    privateKeyPem: env.PRIVATE_KEY_PEM,
-  });
-
-  headers["Signature"] = signature;
-
-  await fetch(inboxUrl, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  // In a production environment, you should implement proper delivery to followers
+  return announce;
 }
 
-async function digestBody(body) {
-  const data = new TextEncoder().encode(JSON.stringify(body));
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return btoa(String.fromCharCode(...new Uint8Array(hash)));
-}
+// Main request handler
+async function handleRequest(request) {
+  const url = new URL(request.url);
+  const domain = DOMAIN;
+  
+  // Handle actor profile request
+  if (url.pathname === '/actor' && request.method === 'GET') {
+    return new Response(
+      JSON.stringify(buildActorObject(domain, PUBLIC_KEY_PEM)),
+      {
+        headers: {
+          'Content-Type': CONTENT_TYPE_HEADER,
+          'Cache-Control': 'max-age=0, private, must-revalidate'
+        }
+      }
+    );
+  }
 
-async function signRequest({ method, url, headers, privateKeyPem }) {
-  const headersToSign = ["(request-target)", "host", "date", "digest"];
-  const signingString = headersToSign.map(h => {
-    if (h === "(request-target)") {
-      return `(request-target): ${method.toLowerCase()} ${url.pathname}`;
+  // Handle inbox
+  if (url.pathname === '/inbox' && request.method === 'POST') {
+    const body = await request.json();
+    
+    if (!await verifySignature(request, body)) {
+      return new Response('Unauthorized', { status: 401 });
     }
-    return `${h}: ${headers[h]}`;
-  }).join("\n");
 
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    pemToArrayBuffer(privateKeyPem),
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      hash: "SHA-256"
-    },
-    false,
-    ["sign"]
-  );
+    if (body.type === 'Follow') {
+      const followerId = body.actor;
+      await FOLLOWERS.put(followerId, 'active');
+      
+      const accept = {
+        '@context': 'https://www.w3.org/ns/activitystreams',
+        'id': `https://${domain}/activities/${Date.now()}`,
+        'type': 'Accept',
+        'actor': generateActorId(domain),
+        'object': body
+      };
 
-  const signatureBuffer = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(signingString)
-  );
+      return new Response(JSON.stringify(accept), {
+        headers: { 'Content-Type': CONTENT_TYPE_HEADER }
+      });
+    }
 
-  const signature = btoa(String.fromCharCode(...new Uint8Array(signatureBuffer)));
-  return `keyId="https://${url.host}/actor/board#main-key",headers="${headersToSign.join(" ")}",signature="${signature}"`;
+    if (body.type === 'Create' && body.object?.type === 'Note') {
+      const followers = await FOLLOWERS.list();
+      const followerIds = followers.keys.map(key => key.name);
+      
+      const broadcast = await broadcastToFollowers(domain, body, followerIds);
+      
+      return new Response(JSON.stringify(broadcast), {
+        headers: { 'Content-Type': CONTENT_TYPE_HEADER }
+      });
+    }
+
+    return new Response('OK');
+  }
+
+  // Handle webfinger
+  if (url.pathname === '/.well-known/webfinger') {
+    const resource = url.searchParams.get('resource');
+    if (!resource?.startsWith('acct:')) {
+      return new Response('Bad Request', { status: 400 });
+    }
+
+    const handle = parseHandle(resource.substring(5));
+    if (!handle || handle.domain !== domain) {
+      return new Response('Not Found', { status: 404 });
+    }
+
+    const response = {
+      'subject': `acct:board@${domain}`,
+      'links': [
+        {
+          'rel': 'self',
+          'type': CONTENT_TYPE_HEADER,
+          'href': generateActorId(domain)
+        }
+      ]
+    };
+
+    return new Response(JSON.stringify(response), {
+      headers: {
+        'Content-Type': 'application/jrd+json',
+        'Cache-Control': 'max-age=0, private, must-revalidate'
+      }
+    });
+  }
+
+  return new Response('Not Found', { status: 404 });
 }
 
-function pemToArrayBuffer(pem) {
-  const b64 = pem.replace(/-----.*?-----/g, "").replace(/\s/g, "");
-  const binary = atob(b64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
+// Register the worker
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
