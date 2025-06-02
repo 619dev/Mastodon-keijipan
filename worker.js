@@ -22,31 +22,69 @@ function parseHandle(mention) {
 function buildActorObject(domain) {
   const actorName = ACTOR_NAME || DEFAULT_ACTOR_NAME;
   const actorIcon = ACTOR_ICON || DEFAULT_ACTOR_ICON;
+  const actorId = generateActorId(domain);
   
   return {
     '@context': [
       'https://www.w3.org/ns/activitystreams',
-      'https://w3id.org/security/v1'
+      'https://w3id.org/security/v1',
+      {
+        'toot': 'http://joinmastodon.org/ns#',
+        'discoverable': 'toot:discoverable',
+        'featured': 'toot:featured',
+        'alsoKnownAs': 'as:alsoKnownAs',
+        'movedTo': 'as:movedTo',
+        'schema': 'http://schema.org#',
+        'PropertyValue': 'schema:PropertyValue',
+        'value': 'schema:value'
+      }
     ],
-    'id': generateActorId(domain),
+    'id': actorId,
     'type': 'Person',
     'preferredUsername': 'board',
     'name': actorName,
+    'discoverable': true,
+    'published': new Date().toISOString(),
     'summary': 'A broadcast bot that forwards mentions to all followers',
+    'url': actorId,
+    'manuallyApprovesFollowers': false,
     'inbox': `https://${domain}/inbox`,
     'outbox': `https://${domain}/outbox`,
     'followers': `https://${domain}/followers`,
     'following': `https://${domain}/following`,
+    'featured': `https://${domain}/featured`,
     'icon': {
       'type': 'Image',
       'mediaType': 'image/png',
       'url': actorIcon
     },
+    'image': {
+      'type': 'Image',
+      'mediaType': 'image/png',
+      'url': actorIcon
+    },
+    'endpoints': {
+      'sharedInbox': `https://${domain}/inbox`
+    },
     'publicKey': {
       'id': generateKeyId(domain),
-      'owner': generateActorId(domain),
+      'owner': actorId,
       'publicKeyPem': PUBLIC_KEY_PEM
-    }
+    },
+    'attachment': [
+      {
+        'type': 'PropertyValue',
+        'name': 'Bot Type',
+        'value': 'Broadcast Bot'
+      },
+      {
+        'type': 'PropertyValue',
+        'name': 'Description',
+        'value': 'A bot that broadcasts messages to all followers'
+      }
+    ],
+    'tag': [],
+    'devices': `https://${domain}/devices`
   };
 }
 
@@ -54,11 +92,9 @@ async function generateSignature(privateKey, method, targetHost, path, date, dig
   const signingString = `(request-target): ${method.toLowerCase()} ${path}\nhost: ${targetHost}\ndate: ${date}\ndigest: ${digest}`;
   
   try {
-    // 使用 Web Crypto API 进行签名
     const encoder = new TextEncoder();
     const data = encoder.encode(signingString);
     
-    // 将 PEM 私钥转换为 CryptoKey
     const pemHeader = "-----BEGIN PRIVATE KEY-----";
     const pemFooter = "-----END PRIVATE KEY-----";
     const pemContents = privateKey.replace(/[\r\n]/g, '')
@@ -113,7 +149,8 @@ async function signRequest(method, targetUrl, body) {
     'Digest': digestHeader,
     'Signature': `keyId="${generateKeyId(DOMAIN)}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signature}"`,
     'Accept': ACCEPT_HEADER,
-    'Content-Type': CONTENT_TYPE_HEADER
+    'Content-Type': CONTENT_TYPE_HEADER,
+    'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
   };
 }
 
@@ -152,11 +189,13 @@ async function createNote(domain, activity) {
   
   if (!object || !object.content) return null;
 
-  // 获取原始发送者的信息
   let actorInfo;
   try {
     const actorResponse = await fetch(actor, {
-      headers: { 'Accept': ACCEPT_HEADER }
+      headers: { 
+        'Accept': ACCEPT_HEADER,
+        'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
+      }
     });
     if (actorResponse.ok) {
       actorInfo = await actorResponse.json();
@@ -166,12 +205,8 @@ async function createNote(domain, activity) {
   }
 
   const noteId = `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-  
-  // 使用 preferredUsername 而不是 name
   const username = actorInfo ? actorInfo.preferredUsername : new URL(actor).pathname.split('/').pop();
   const actorDomain = new URL(actor).host;
-  
-  // 构建消息内容，使用用户名而不是显示名称
   const messageContent = `RT @${username}@${actorDomain}\n\n${object.content}`;
   
   return {
@@ -198,7 +233,7 @@ async function createNote(domain, activity) {
       ...(object.tag || [])
     ],
     'inReplyTo': object.inReplyTo || null,
-    // 添加原始作者信息，同样使用用户名
+    'conversation': object.conversation || null,
     'originalAuthor': {
       'type': 'Person',
       'id': actor,
@@ -227,7 +262,8 @@ async function broadcastToFollowers(domain, activity, followers) {
       'actor': generateActorId(domain),
       'object': note,
       'to': ['https://www.w3.org/ns/activitystreams#Public'],
-      'cc': followers
+      'cc': followers,
+      'published': new Date().toISOString()
     };
 
     console.log('Broadcasting to followers:', followers);
@@ -237,7 +273,8 @@ async function broadcastToFollowers(domain, activity, followers) {
         console.log(`Fetching actor info for ${followerId}`);
         const followerResponse = await fetch(followerId, {
           headers: {
-            'Accept': ACCEPT_HEADER
+            'Accept': ACCEPT_HEADER,
+            'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
           }
         });
         
@@ -281,7 +318,8 @@ async function handleRequest(request) {
       {
         headers: {
           'Content-Type': CONTENT_TYPE_HEADER,
-          'Cache-Control': 'max-age=0, private, must-revalidate'
+          'Cache-Control': 'max-age=0, private, must-revalidate',
+          'Access-Control-Allow-Origin': '*'
         }
       }
     );
@@ -311,13 +349,16 @@ async function handleRequest(request) {
           'id': `https://${domain}/activities/accept/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
           'type': 'Accept',
           'actor': generateActorId(domain),
-          'object': body
+          'object': body,
+          'published': new Date().toISOString()
         };
 
-        // 发送Accept响应到关注者的收件箱
         try {
           const followerResponse = await fetch(followerId, {
-            headers: { 'Accept': ACCEPT_HEADER }
+            headers: { 
+              'Accept': ACCEPT_HEADER,
+              'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
+            }
           });
           
           if (followerResponse.ok) {
@@ -331,7 +372,10 @@ async function handleRequest(request) {
         }
 
         return new Response(JSON.stringify(accept), {
-          headers: { 'Content-Type': CONTENT_TYPE_HEADER }
+          headers: { 
+            'Content-Type': CONTENT_TYPE_HEADER,
+            'Cache-Control': 'max-age=0, private, must-revalidate'
+          }
         });
       } catch (error) {
         console.error('Error handling Follow request:', error);
@@ -343,7 +387,6 @@ async function handleRequest(request) {
       console.log('Processing Create activity for Note');
       
       try {
-        // 获取所有关注者
         const { keys } = await FOLLOWERS.list();
         const followerIds = keys.map(key => key.name);
         
@@ -354,7 +397,10 @@ async function handleRequest(request) {
           if (broadcast) {
             console.log('Broadcast created:', JSON.stringify(broadcast));
             return new Response(JSON.stringify(broadcast), {
-              headers: { 'Content-Type': CONTENT_TYPE_HEADER }
+              headers: { 
+                'Content-Type': CONTENT_TYPE_HEADER,
+                'Cache-Control': 'max-age=0, private, must-revalidate'
+              }
             });
           }
         }
@@ -381,10 +427,18 @@ async function handleRequest(request) {
 
     const response = {
       'subject': `acct:board@${domain}`,
+      'aliases': [
+        generateActorId(domain)
+      ],
       'links': [
         {
           'rel': 'self',
           'type': CONTENT_TYPE_HEADER,
+          'href': generateActorId(domain)
+        },
+        {
+          'rel': 'http://webfinger.net/rel/profile-page',
+          'type': 'text/html',
           'href': generateActorId(domain)
         }
       ]
@@ -438,7 +492,7 @@ async function handleRequest(request) {
       },
       'openRegistrations': false,
       'metadata': {
-        'nodeName': 'Broadcast Bot',
+        'nodeName': ACTOR_NAME || DEFAULT_ACTOR_NAME,
         'nodeDescription': 'A bot that broadcasts messages to all followers'
       }
     };
