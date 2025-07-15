@@ -338,9 +338,8 @@ async function handleRequest(request) {
       }
     }
 
-    // 处理 Create/Note，防止重复、每日次数限制
+    // 处理 Create/Note，每天最多广播N次
     if (body.type === 'Create' && body.object?.type === 'Note') {
-      // 取唯一ID，优先 object.id，其次 activity.id，再次内容hash
       let noteId = body.object.id || body.id;
       if (!noteId && body.object.content) {
         noteId = 'hash_' + btoa(unescape(encodeURIComponent(body.object.content))).slice(0, 32);
@@ -351,7 +350,6 @@ async function handleRequest(request) {
       }
 
       const today = getToday();
-      const idKey = `id:${noteId}`;
       const countKey = `count:${noteId}:${today}`;
       let maxPerDay = 10;
       if (typeof MAX_BROADCAST_PER_ID_PER_DAY !== 'undefined') {
@@ -359,32 +357,21 @@ async function handleRequest(request) {
         if (!isNaN(parsed)) maxPerDay = parsed;
       }
 
-      let processed, count;
+      let count;
       try {
-        [processed, count] = await Promise.all([
-          BROADCAST_IDS.get(idKey),
-          BROADCAST_IDS.get(countKey)
-        ]);
+        count = await BROADCAST_IDS.get(countKey);
       } catch (e) {
         console.log('KV get error', e);
-        processed = null;
         count = null;
       }
 
-      if (processed) {
-        console.log('Duplicate', noteId);
-        return new Response('Duplicate', { status: 200 });
-      }
       if (count && parseInt(count, 10) >= maxPerDay) {
         console.log('Daily limit reached', noteId);
         return new Response('Daily limit reached', { status: 200 });
       }
 
       try {
-        await Promise.all([
-          BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }),
-          BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 })
-        ]);
+        await BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 });
       } catch (e) {
         console.log('KV put error', e);
       }
