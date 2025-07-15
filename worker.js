@@ -95,17 +95,14 @@ function getToday() {
 
 async function generateSignature(privateKey, method, targetHost, path, date, digest) {
   const signingString = `(request-target): ${method.toLowerCase()} ${path}\nhost: ${targetHost}\ndate: ${date}\ndigest: ${digest}`;
-
   try {
     const encoder = new TextEncoder();
     const data = encoder.encode(signingString);
-
     const pemHeader = "-----BEGIN PRIVATE KEY-----";
     const pemFooter = "-----END PRIVATE KEY-----";
     const pemContents = privateKey.replace(/[\r\n]/g, '')
       .replace(pemHeader, '')
       .replace(pemFooter, '');
-
     const binaryKey = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
     const privateKeyObject = await crypto.subtle.importKey(
       "pkcs8",
@@ -117,13 +114,11 @@ async function generateSignature(privateKey, method, targetHost, path, date, dig
       false,
       ["sign"]
     );
-
     const signature = await crypto.subtle.sign(
       "RSASSA-PKCS1-v1_5",
       privateKeyObject,
       data
     );
-
     return btoa(String.fromCharCode(...new Uint8Array(signature)));
   } catch (error) {
     console.error('Error generating signature:', error);
@@ -138,7 +133,6 @@ async function signRequest(method, targetUrl, body) {
     new TextEncoder().encode(JSON.stringify(body))
   );
   const digestHeader = 'SHA-256=' + btoa(String.fromCharCode(...new Uint8Array(digest)));
-
   const signature = await generateSignature(
     PRIVATE_KEY_PEM,
     method,
@@ -147,7 +141,6 @@ async function signRequest(method, targetUrl, body) {
     date,
     digestHeader
   );
-
   return {
     'Host': targetUrl.host,
     'Date': date,
@@ -165,18 +158,18 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
     try {
       const targetUrl = new URL(targetInbox);
       const headers = await signRequest('POST', targetUrl, activity);
-
       const response = await fetch(targetInbox, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(activity)
       });
-
       if (response.ok) {
         return true;
       }
-    } catch (error) {}
-    await new Promise(res => setTimeout(res, 1000 * (i + 1))); // 递增等待
+    } catch (error) {
+      console.log('deliverToInbox error', error);
+    }
+    await new Promise(res => setTimeout(res, 1000 * (i + 1)));
   }
   return false;
 }
@@ -184,9 +177,7 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
 async function createNote(domain, activity) {
   const actor = activity.actor;
   const object = activity.object;
-
   if (!object || !object.content) return null;
-
   let actorInfo;
   try {
     const actorResponse = await fetch(actor, {
@@ -199,12 +190,10 @@ async function createNote(domain, activity) {
       actorInfo = await actorResponse.json();
     }
   } catch (error) {}
-
   const noteId = object.id || `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
   const username = actorInfo ? actorInfo.preferredUsername : new URL(actor).pathname.split('/').pop();
   const actorDomain = new URL(actor).host;
   const messageContent = `RT @${username}@${actorDomain}\n\n${object.content}`;
-
   return {
     '@context': [
       'https://www.w3.org/ns/activitystreams',
@@ -244,7 +233,6 @@ async function broadcastToFollowers(domain, activity, followers) {
   try {
     const note = await createNote(domain, activity);
     if (!note) return null;
-
     const createActivity = {
       '@context': [
         'https://www.w3.org/ns/activitystreams',
@@ -258,7 +246,6 @@ async function broadcastToFollowers(domain, activity, followers) {
       'cc': followers,
       'published': new Date().toISOString()
     };
-
     for (const followerId of followers) {
       try {
         const followerResponse = await fetch(followerId, {
@@ -267,20 +254,19 @@ async function broadcastToFollowers(domain, activity, followers) {
             'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
           }
         });
-
         if (!followerResponse.ok) continue;
-
         const followerActor = await followerResponse.json();
         const inbox = followerActor.inbox;
-
         if (inbox) {
           await deliverToInbox(createActivity, inbox);
         }
-      } catch (error) {}
+      } catch (error) {
+        console.log('broadcastToFollowers error', error);
+      }
     }
-
     return createActivity;
   } catch (error) {
+    console.log('broadcastToFollowers error', error);
     return null;
   }
 }
@@ -290,7 +276,6 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const domain = DOMAIN;
 
-  // Handle actor profile request
   if (url.pathname === '/actor' && request.method === 'GET') {
     return new Response(
       JSON.stringify(buildActorObject(domain)),
@@ -304,12 +289,12 @@ async function handleRequest(request) {
     );
   }
 
-  // Handle inbox
   if (url.pathname === '/inbox' && request.method === 'POST') {
     let body;
     try {
       body = await request.json();
     } catch (e) {
+      console.log('Invalid JSON', e);
       return new Response('Invalid JSON', { status: 400 });
     }
 
@@ -317,7 +302,6 @@ async function handleRequest(request) {
       const followerId = body.actor;
       try {
         await FOLLOWERS.put(followerId, 'active');
-
         const accept = {
           '@context': 'https://www.w3.org/ns/activitystreams',
           'id': `https://${domain}/activities/accept/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
@@ -326,7 +310,6 @@ async function handleRequest(request) {
           'object': body,
           'published': new Date().toISOString()
         };
-
         try {
           const followerResponse = await fetch(followerId, {
             headers: {
@@ -334,15 +317,15 @@ async function handleRequest(request) {
               'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
             }
           });
-
           if (followerResponse.ok) {
             const followerActor = await followerResponse.json();
             if (followerActor.inbox) {
               await deliverToInbox(accept, followerActor.inbox);
             }
           }
-        } catch (error) {}
-
+        } catch (error) {
+          console.log('Accept deliver error', error);
+        }
         return new Response(JSON.stringify(accept), {
           headers: {
             'Content-Type': CONTENT_TYPE_HEADER,
@@ -350,52 +333,69 @@ async function handleRequest(request) {
           }
         });
       } catch (error) {
+        console.log('Follow error', error);
         return new Response('Internal Server Error', { status: 500 });
       }
     }
 
     // 处理 Create/Note，防止重复、每日次数限制
     if (body.type === 'Create' && body.object?.type === 'Note') {
-      // 取唯一ID（优先用 object.id，没有就用 activity.id）
-      const noteId = (body.object.id) || body.id;
+      // 取唯一ID，优先 object.id，其次 activity.id，再次内容hash
+      let noteId = body.object.id || body.id;
+      if (!noteId && body.object.content) {
+        noteId = 'hash_' + btoa(unescape(encodeURIComponent(body.object.content))).slice(0, 32);
+      }
       if (!noteId) {
+        console.log('Missing ID');
         return new Response('Missing ID', { status: 400 });
       }
 
-      // KV key 设计
       const today = getToday();
       const idKey = `id:${noteId}`;
       const countKey = `count:${noteId}:${today}`;
-      const maxPerDay = parseInt(typeof MAX_BROADCAST_PER_ID_PER_DAY !== 'undefined' ? MAX_BROADCAST_PER_ID_PER_DAY : '10', 10);
+      let maxPerDay = 10;
+      if (typeof MAX_BROADCAST_PER_ID_PER_DAY !== 'undefined') {
+        const parsed = parseInt(MAX_BROADCAST_PER_ID_PER_DAY, 10);
+        if (!isNaN(parsed)) maxPerDay = parsed;
+      }
 
-      // 检查是否已处理
-      const [processed, count] = await Promise.all([
-        BROADCAST_IDS.get(idKey),
-        BROADCAST_IDS.get(countKey)
-      ]);
+      let processed, count;
+      try {
+        [processed, count] = await Promise.all([
+          BROADCAST_IDS.get(idKey),
+          BROADCAST_IDS.get(countKey)
+        ]);
+      } catch (e) {
+        console.log('KV get error', e);
+        processed = null;
+        count = null;
+      }
+
       if (processed) {
-        // 已处理过，直接返回OK
+        console.log('Duplicate', noteId);
         return new Response('Duplicate', { status: 200 });
       }
       if (count && parseInt(count, 10) >= maxPerDay) {
-        // 超过每日次数
+        console.log('Daily limit reached', noteId);
         return new Response('Daily limit reached', { status: 200 });
       }
 
-      // 记录已处理ID和计数（必须在广播前先写入，防止并发重复）
-      await Promise.all([
-        BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }), // 2天后过期
-        BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 }) // 1天后过期
-      ]);
+      try {
+        await Promise.all([
+          BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }),
+          BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 })
+        ]);
+      } catch (e) {
+        console.log('KV put error', e);
+      }
 
-      // 广播
       try {
         const { keys } = await FOLLOWERS.list();
         const followerIds = keys.map(key => key.name);
-
         if (followerIds.length > 0) {
           const broadcast = await broadcastToFollowers(domain, body, followerIds);
           if (broadcast) {
+            console.log('Broadcast success', noteId);
             return new Response(JSON.stringify(broadcast), {
               headers: {
                 'Content-Type': CONTENT_TYPE_HEADER,
@@ -404,7 +404,9 @@ async function handleRequest(request) {
             });
           }
         }
+        console.log('No followers or broadcast failed', noteId);
       } catch (error) {
+        console.log('Broadcast error', error);
         return new Response('Internal Server Error', { status: 500 });
       }
     }
@@ -412,18 +414,15 @@ async function handleRequest(request) {
     return new Response('OK');
   }
 
-  // Handle webfinger
   if (url.pathname === '/.well-known/webfinger') {
     const resource = url.searchParams.get('resource');
     if (!resource?.startsWith('acct:')) {
       return new Response('Bad Request', { status: 400 });
     }
-
     const handle = parseHandle(resource.substring(5));
     if (!handle || handle.domain !== domain) {
       return new Response('Not Found', { status: 404 });
     }
-
     const response = {
       'subject': `acct:board@${domain}`,
       'aliases': [
@@ -442,7 +441,6 @@ async function handleRequest(request) {
         }
       ]
     };
-
     return new Response(JSON.stringify(response), {
       headers: {
         'Content-Type': 'application/jrd+json',
@@ -451,7 +449,6 @@ async function handleRequest(request) {
     });
   }
 
-  // Handle nodeinfo
   if (url.pathname === '/.well-known/nodeinfo') {
     const response = {
       'links': [
