@@ -177,78 +177,29 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
   return false;
 }
 
-async function createNote(domain, activity) {
-  const actor = activity.actor;
-  const object = activity.object;
-  if (!object || !object.content) return null;
-  let actorInfo;
-  try {
-    const actorResponse = await fetch(actor, {
-      headers: {
-        'Accept': ACCEPT_HEADER,
-        'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
-      }
-    });
-    if (actorResponse.ok) {
-      actorInfo = await actorResponse.json();
-    }
-  } catch (error) {}
-  const noteId = object.id || `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-  const username = actorInfo ? actorInfo.preferredUsername : new URL(actor).pathname.split('/').pop();
-  const actorDomain = new URL(actor).host;
-  const messageContent = `RT @${username}@${actorDomain}\n\n${object.content}`;
-  return {
-    '@context': [
-      'https://www.w3.org/ns/activitystreams',
-      'https://w3id.org/security/v1'
-    ],
-    'id': noteId,
-    'type': 'Note',
-    'published': new Date().toISOString(),
-    'attributedTo': generateActorId(domain),
-    'content': messageContent,
-    'to': ['https://www.w3.org/ns/activitystreams#Public'],
-    'cc': [],
-    'sensitive': object.sensitive || false,
-    'contentMap': object.contentMap || null,
-    'attachment': object.attachment || [],
-    'tag': [
-      {
-        'type': 'Mention',
-        'href': actor,
-        'name': `@${username}@${actorDomain}`
-      },
-      ...(object.tag || [])
-    ],
-    'inReplyTo': object.inReplyTo || null,
-    'conversation': object.conversation || null,
-    'originalAuthor': {
-      'type': 'Person',
-      'id': actor,
-      'name': username,
-      'preferredUsername': username,
-      'url': actor
-    }
-  };
-}
-
+// Announce（转发）广播
 async function broadcastToFollowers(domain, activity, followers) {
   try {
-    const note = await createNote(domain, activity);
-    if (!note) return null;
-    const createActivity = {
+    const originalObjectId = activity.object && activity.object.id;
+    if (!originalObjectId) {
+      console.log('No original object id to announce');
+      return null;
+    }
+
+    const announceActivity = {
       '@context': [
         'https://www.w3.org/ns/activitystreams',
         'https://w3id.org/security/v1'
       ],
-      'id': `https://${domain}/activities/create/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-      'type': 'Create',
+      'id': `https://${domain}/activities/announce/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
+      'type': 'Announce',
       'actor': generateActorId(domain),
-      'object': note,
+      'object': originalObjectId,
       'to': ['https://www.w3.org/ns/activitystreams#Public'],
       'cc': followers,
       'published': new Date().toISOString()
     };
+
     for (const followerId of followers) {
       try {
         const followerResponse = await fetch(followerId, {
@@ -261,13 +212,13 @@ async function broadcastToFollowers(domain, activity, followers) {
         const followerActor = await followerResponse.json();
         const inbox = followerActor.inbox;
         if (inbox) {
-          await deliverToInbox(createActivity, inbox);
+          await deliverToInbox(announceActivity, inbox);
         }
       } catch (error) {
         console.log('broadcastToFollowers error', error);
       }
     }
-    return createActivity;
+    return announceActivity;
   } catch (error) {
     console.log('broadcastToFollowers error', error);
     return null;
