@@ -88,6 +88,12 @@ function buildActorObject(domain) {
   };
 }
 
+// 获取今天日期字符串
+function getToday() {
+  const now = new Date();
+  return now.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
 async function generateSignature(privateKey, method, targetHost, path, date, digest) {
   const signingString = `(request-target): ${method.toLowerCase()} ${path}\nhost: ${targetHost}\ndate: ${date}\ndigest: ${digest}`;
   
@@ -154,33 +160,36 @@ async function signRequest(method, targetUrl, body) {
   };
 }
 
-async function deliverToInbox(activity, targetInbox) {
-  try {
-    const targetUrl = new URL(targetInbox);
-    const headers = await signRequest('POST', targetUrl, activity);
+// 带重试机制的投递
+async function deliverToInbox(activity, targetInbox, retry = 3) {
+  for (let i = 0; i < retry; i++) {
+    try {
+      const targetUrl = new URL(targetInbox);
+      const headers = await signRequest('POST', targetUrl, activity);
 
-    console.log(`Delivering to inbox ${targetInbox}`);
-    console.log('Activity:', JSON.stringify(activity));
-    console.log('Headers:', JSON.stringify(headers));
+      console.log(`Delivering to inbox ${targetInbox}`);
+      console.log('Activity:', JSON.stringify(activity));
+      console.log('Headers:', JSON.stringify(headers));
 
-    const response = await fetch(targetInbox, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify(activity)
-    });
+      const response = await fetch(targetInbox, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(activity)
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Failed to deliver to ${targetInbox}. Status: ${response.status}, Error: ${errorText}`);
-      return false;
+      if (response.ok) {
+        console.log(`Successfully delivered to ${targetInbox}`);
+        return true;
+      } else {
+        const errorText = await response.text();
+        console.error(`Failed to deliver to ${targetInbox}. Status: ${response.status}, Error: ${errorText}`);
+      }
+    } catch (error) {
+      console.error(`Failed to deliver to ${targetInbox}:`, error);
     }
-
-    console.log(`Successfully delivered to ${targetInbox}`);
-    return true;
-  } catch (error) {
-    console.error(`Failed to deliver to ${targetInbox}:`, error);
-    return false;
+    await new Promise(res => setTimeout(res, 1000 * (i + 1))); // 递增等待
   }
+  return false;
 }
 
 async function createNote(domain, activity) {
@@ -383,9 +392,34 @@ async function handleRequest(request) {
       }
     }
 
+    // 处理 Create/Note，防止重复、每日次数限制
     if (body.type === 'Create' && body.object?.type === 'Note') {
-      console.log('Processing Create activity for Note');
-      
+      // 取唯一ID（优先用 object.id，没有就用 activity.id）
+      const noteId = (body.object.id) || body.id;
+      if (!noteId) {
+        return new Response('Missing ID', { status: 400 });
+      }
+
+      // KV key 设计
+      const today = getToday();
+      const idKey = `id:${noteId}`;
+      const countKey = `count:${noteId}:${today}`;
+      const maxPerDay = parseInt(typeof MAX_BROADCAST_PER_ID_PER_DAY !== 'undefined' ? MAX_BROADCAST_PER_ID_PER_DAY : '10', 10);
+
+      // 检查是否已处理
+      const [processed, count] = await Promise.all([
+        BROADCAST_IDS.get(idKey),
+        BROADCAST_IDS.get(countKey)
+      ]);
+      if (processed) {
+        // 已处理过，直接返回OK
+        return new Response('Duplicate', { status: 200 });
+      }
+      if (count && parseInt(count, 10) >= maxPerDay) {
+        // 超过每日次数
+        return new Response('Daily limit reached', { status: 200 });
+      }
+
       try {
         const { keys } = await FOLLOWERS.list();
         const followerIds = keys.map(key => key.name);
@@ -395,6 +429,11 @@ async function handleRequest(request) {
         if (followerIds.length > 0) {
           const broadcast = await broadcastToFollowers(domain, body, followerIds);
           if (broadcast) {
+            // 记录已处理ID和计数
+            await Promise.all([
+              BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }), // 2天后过期
+              BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 }) // 1天后过期
+            ]);
             console.log('Broadcast created:', JSON.stringify(broadcast));
             return new Response(JSON.stringify(broadcast), {
               headers: { 
