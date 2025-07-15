@@ -164,7 +164,10 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
         body: JSON.stringify(activity)
       });
       if (response.ok) {
+        console.log('Delivered to', targetInbox);
         return true;
+      } else {
+        console.log('Failed to deliver', targetInbox, response.status, await response.text());
       }
     } catch (error) {
       console.log('deliverToInbox error', error);
