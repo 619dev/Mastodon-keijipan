@@ -1,5 +1,4 @@
 // ActivityPub Broadcast Bot for Cloudflare Workers
-// Constants and types
 const CONTENT_TYPE_HEADER = 'application/activity+json';
 const ACCEPT_HEADER = 'application/activity+json, application/ld+json';
 const DEFAULT_ACTOR_NAME = 'Broadcast Bot';
@@ -23,7 +22,7 @@ function buildActorObject(domain) {
   const actorName = ACTOR_NAME || DEFAULT_ACTOR_NAME;
   const actorIcon = ACTOR_ICON || DEFAULT_ACTOR_ICON;
   const actorId = generateActorId(domain);
-  
+
   return {
     '@context': [
       'https://www.w3.org/ns/activitystreams',
@@ -96,17 +95,17 @@ function getToday() {
 
 async function generateSignature(privateKey, method, targetHost, path, date, digest) {
   const signingString = `(request-target): ${method.toLowerCase()} ${path}\nhost: ${targetHost}\ndate: ${date}\ndigest: ${digest}`;
-  
+
   try {
     const encoder = new TextEncoder();
     const data = encoder.encode(signingString);
-    
+
     const pemHeader = "-----BEGIN PRIVATE KEY-----";
     const pemFooter = "-----END PRIVATE KEY-----";
     const pemContents = privateKey.replace(/[\r\n]/g, '')
       .replace(pemHeader, '')
       .replace(pemFooter, '');
-    
+
     const binaryKey = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
     const privateKeyObject = await crypto.subtle.importKey(
       "pkcs8",
@@ -139,7 +138,7 @@ async function signRequest(method, targetUrl, body) {
     new TextEncoder().encode(JSON.stringify(body))
   );
   const digestHeader = 'SHA-256=' + btoa(String.fromCharCode(...new Uint8Array(digest)));
-  
+
   const signature = await generateSignature(
     PRIVATE_KEY_PEM,
     method,
@@ -167,10 +166,6 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
       const targetUrl = new URL(targetInbox);
       const headers = await signRequest('POST', targetUrl, activity);
 
-      console.log(`Delivering to inbox ${targetInbox}`);
-      console.log('Activity:', JSON.stringify(activity));
-      console.log('Headers:', JSON.stringify(headers));
-
       const response = await fetch(targetInbox, {
         method: 'POST',
         headers: headers,
@@ -178,15 +173,9 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
       });
 
       if (response.ok) {
-        console.log(`Successfully delivered to ${targetInbox}`);
         return true;
-      } else {
-        const errorText = await response.text();
-        console.error(`Failed to deliver to ${targetInbox}. Status: ${response.status}, Error: ${errorText}`);
       }
-    } catch (error) {
-      console.error(`Failed to deliver to ${targetInbox}:`, error);
-    }
+    } catch (error) {}
     await new Promise(res => setTimeout(res, 1000 * (i + 1))); // 递增等待
   }
   return false;
@@ -195,13 +184,13 @@ async function deliverToInbox(activity, targetInbox, retry = 3) {
 async function createNote(domain, activity) {
   const actor = activity.actor;
   const object = activity.object;
-  
+
   if (!object || !object.content) return null;
 
   let actorInfo;
   try {
     const actorResponse = await fetch(actor, {
-      headers: { 
+      headers: {
         'Accept': ACCEPT_HEADER,
         'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
       }
@@ -209,15 +198,13 @@ async function createNote(domain, activity) {
     if (actorResponse.ok) {
       actorInfo = await actorResponse.json();
     }
-  } catch (error) {
-    console.error('Error fetching actor info:', error);
-  }
+  } catch (error) {}
 
-  const noteId = `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+  const noteId = object.id || `https://${domain}/notes/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
   const username = actorInfo ? actorInfo.preferredUsername : new URL(actor).pathname.split('/').pop();
   const actorDomain = new URL(actor).host;
   const messageContent = `RT @${username}@${actorDomain}\n\n${object.content}`;
-  
+
   return {
     '@context': [
       'https://www.w3.org/ns/activitystreams',
@@ -256,10 +243,7 @@ async function createNote(domain, activity) {
 async function broadcastToFollowers(domain, activity, followers) {
   try {
     const note = await createNote(domain, activity);
-    if (!note) {
-      console.log('Failed to create note from activity');
-      return null;
-    }
+    if (!note) return null;
 
     const createActivity = {
       '@context': [
@@ -275,40 +259,28 @@ async function broadcastToFollowers(domain, activity, followers) {
       'published': new Date().toISOString()
     };
 
-    console.log('Broadcasting to followers:', followers);
-    
     for (const followerId of followers) {
       try {
-        console.log(`Fetching actor info for ${followerId}`);
         const followerResponse = await fetch(followerId, {
           headers: {
             'Accept': ACCEPT_HEADER,
             'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
           }
         });
-        
-        if (!followerResponse.ok) {
-          console.error(`Failed to fetch follower info for ${followerId}. Status: ${followerResponse.status}`);
-          continue;
-        }
+
+        if (!followerResponse.ok) continue;
 
         const followerActor = await followerResponse.json();
         const inbox = followerActor.inbox;
-        
+
         if (inbox) {
-          console.log(`Delivering to follower inbox: ${inbox}`);
           await deliverToInbox(createActivity, inbox);
-        } else {
-          console.error(`No inbox found for follower ${followerId}`);
         }
-      } catch (error) {
-        console.error(`Error processing follower ${followerId}:`, error);
-      }
+      } catch (error) {}
     }
 
     return createActivity;
   } catch (error) {
-    console.error('Error in broadcastToFollowers:', error);
     return null;
   }
 }
@@ -318,8 +290,6 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const domain = DOMAIN;
 
-  console.log(`Handling ${request.method} request to ${url.pathname}`);
-  
   // Handle actor profile request
   if (url.pathname === '/actor' && request.method === 'GET') {
     return new Response(
@@ -339,20 +309,15 @@ async function handleRequest(request) {
     let body;
     try {
       body = await request.json();
-      console.log('Received activity:', JSON.stringify(body));
     } catch (e) {
-      console.error('Failed to parse request body:', e);
       return new Response('Invalid JSON', { status: 400 });
     }
 
     if (body.type === 'Follow') {
       const followerId = body.actor;
-      console.log(`Handling Follow request from ${followerId}`);
-      
       try {
         await FOLLOWERS.put(followerId, 'active');
-        console.log(`Added follower ${followerId} to KV store`);
-        
+
         const accept = {
           '@context': 'https://www.w3.org/ns/activitystreams',
           'id': `https://${domain}/activities/accept/${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
@@ -364,30 +329,27 @@ async function handleRequest(request) {
 
         try {
           const followerResponse = await fetch(followerId, {
-            headers: { 
+            headers: {
               'Accept': ACCEPT_HEADER,
               'User-Agent': 'ActivityPub-Broadcast-Bot/1.0.0'
             }
           });
-          
+
           if (followerResponse.ok) {
             const followerActor = await followerResponse.json();
             if (followerActor.inbox) {
               await deliverToInbox(accept, followerActor.inbox);
             }
           }
-        } catch (error) {
-          console.error('Failed to send Accept:', error);
-        }
+        } catch (error) {}
 
         return new Response(JSON.stringify(accept), {
-          headers: { 
+          headers: {
             'Content-Type': CONTENT_TYPE_HEADER,
             'Cache-Control': 'max-age=0, private, must-revalidate'
           }
         });
       } catch (error) {
-        console.error('Error handling Follow request:', error);
         return new Response('Internal Server Error', { status: 500 });
       }
     }
@@ -420,23 +382,22 @@ async function handleRequest(request) {
         return new Response('Daily limit reached', { status: 200 });
       }
 
+      // 记录已处理ID和计数（必须在广播前先写入，防止并发重复）
+      await Promise.all([
+        BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }), // 2天后过期
+        BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 }) // 1天后过期
+      ]);
+
+      // 广播
       try {
         const { keys } = await FOLLOWERS.list();
         const followerIds = keys.map(key => key.name);
-        
-        console.log('Found followers:', followerIds);
 
         if (followerIds.length > 0) {
           const broadcast = await broadcastToFollowers(domain, body, followerIds);
           if (broadcast) {
-            // 记录已处理ID和计数
-            await Promise.all([
-              BROADCAST_IDS.put(idKey, '1', { expirationTtl: 2 * 24 * 3600 }), // 2天后过期
-              BROADCAST_IDS.put(countKey, count ? (parseInt(count, 10) + 1).toString() : '1', { expirationTtl: 24 * 3600 }) // 1天后过期
-            ]);
-            console.log('Broadcast created:', JSON.stringify(broadcast));
             return new Response(JSON.stringify(broadcast), {
-              headers: { 
+              headers: {
                 'Content-Type': CONTENT_TYPE_HEADER,
                 'Cache-Control': 'max-age=0, private, must-revalidate'
               }
@@ -444,7 +405,6 @@ async function handleRequest(request) {
           }
         }
       } catch (error) {
-        console.error('Error processing Create activity:', error);
         return new Response('Internal Server Error', { status: 500 });
       }
     }
