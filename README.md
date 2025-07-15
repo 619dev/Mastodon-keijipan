@@ -33,17 +33,33 @@ openssl rsa -in private.pem -pubout -out public.pem
 
 在 Cloudflare Dashboard → Worker → Settings → Variables 中添加以下变量：
 
-| 变量名             | 用途                | 类型      |
-|--------------------|---------------------|-----------|
-| `PRIVATE_KEY_PEM`  | PEM 格式私钥        | Secret    |
-| `PUBLIC_KEY_PEM`   | PEM 格式公钥        | Plaintext |
-| `DOMAIN`           | 你的域名（如 keiji.uk） | Plaintext |
-| `ACTOR_NAME`       | @board 的显示名称（默认 "Broadcast Bot"） | Plaintext |
-| `ACTOR_ICON`       | 头像地址（PNG 图片） | Plaintext |
+| 变量名                             | 用途                                    | 类型      |
+|------------------------------------|-----------------------------------------|-----------|
+| `PRIVATE_KEY_PEM`                  | PEM 格式私钥                            | Secret    |
+| `PUBLIC_KEY_PEM`                   | PEM 格式公钥                            | Plaintext |
+| `DOMAIN`                           | 你的域名（如 keiji.uk）                 | Plaintext |
+| `ACTOR_NAME`                       | @board 的显示名称（默认 "Broadcast Bot"） | Plaintext |
+| `ACTOR_ICON`                       | 头像地址（PNG 图片）                    | Plaintext |
+| `MAX_BROADCAST_PER_ID_PER_DAY`     | 每个消息ID每天最多广播次数（如10或20）   | Plaintext |
 
 ### 4. 配置 KV 命名空间
 
-创建一个名为 `FOLLOWERS` 的 KV 命名空间，并绑定到 Worker。
+创建并绑定以下 KV 命名空间到 Worker：
+
+- `FOLLOWERS`：管理关注者
+- `BROADCAST_IDS`：记录已处理/已广播的消息ID及每日次数
+
+在 `wrangler.toml` 中示例：
+
+```toml
+[[kv_namespaces]]
+binding = "FOLLOWERS"
+id = "<your-followers-namespace-id>"
+
+[[kv_namespaces]]
+binding = "BROADCAST_IDS"
+id = "<your-broadcast-ids-namespace-id>"
+```
 
 ---
 
@@ -54,6 +70,9 @@ openssl rsa -in private.pem -pubout -out public.pem
 - 🔐 支持自定义密钥与域名
 - 🖼️ 支持自定义头像与显示名称
 - 🗂️ KV 存储管理关注者
+- 🛡️ **防止重复广播**：每条消息ID只处理一次，已处理ID自动记录，防止多实例重复广播
+- 🔄 **重试机制**：消息投递失败自动重试，确保可靠性
+- ⏳ **每日广播次数限制**：每个消息ID每天最多广播N次（可通过环境变量配置）
 
 ---
 
